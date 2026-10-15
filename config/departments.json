@@ -1,0 +1,38 @@
+[
+  {
+    "id": "planning",
+    "name": "기획팀",
+    "order": 1,
+    "description": "무엇을 왜 만드는지 정한다. 요구사항, 사용자 스토리, 완료 기준"
+  },
+  {
+    "id": "design",
+    "name": "디자인팀",
+    "order": 2,
+    "description": "사용자 흐름, 화면 구성, 시각 스타일과 디자인 시스템"
+  },
+  {
+    "id": "uiux-dev",
+    "name": "UIUX개발팀",
+    "order": 3,
+    "description": "디자인을 실제 화면 코드로 구현하고 접근성을 보장한다"
+  },
+  {
+    "id": "development",
+    "name": "개발팀",
+    "order": 4,
+    "description": "아키텍처, 서버, 데이터, API 구현"
+  },
+  {
+    "id": "qa",
+    "name": "품질관리팀",
+    "order": 5,
+    "description": "테스트 작성과 실행, 코드 리뷰로 품질을 지킨다"
+  },
+  {
+    "id": "verification",
+    "name": "검증팀",
+    "order": 6,
+    "description": "출시 전 최종 검증. 요구사항 충족 여부와 보안 점검"
+  }
+]

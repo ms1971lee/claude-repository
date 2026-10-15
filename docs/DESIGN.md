@@ -64,16 +64,15 @@
 
 ```
 agents/
-├── development/
-│   ├── dev-lead.md
-│   ├── architect.md
-│   └── code-reviewer.md
-├── marketing/
-│   ├── marketing-lead.md
-│   └── copywriter.md
-└── lifestyle/
-    └── saju-advisor.md
+├── planning/        기획팀     planning-lead, product-planner, requirements-analyst
+├── design/          디자인팀   design-lead, ux-designer, visual-designer
+├── uiux-dev/        UIUX개발팀 uiux-lead, frontend-developer, accessibility-specialist
+├── development/     개발팀     dev-lead, architect, backend-developer
+├── qa/              품질관리팀 qa-lead, test-engineer, code-reviewer
+└── verification/    검증팀     verification-lead, acceptance-verifier, security-auditor
 ```
+
+부서 목록은 `config/departments.json`에 둔다.
 
 에이전트 파일 형식:
 
@@ -100,10 +99,11 @@ owner: ms1971lee
 - 건강·법률·투자 판단을 단정하지 않는다
 ```
 
-`scripts/sync-agents` 스크립트가 할 일:
-- `agents/**/*.md`를 읽어 필수 필드(name, description)를 검사한다
-- `.claude/agents/`로 복사한다 (Claude Code가 인식하는 위치)
+`scripts/sync_agents.py` 스크립트가 할 일:
+- `agents/*/*.md`를 읽어 필드(이름과 파일명 일치, 부서와 폴더 일치, 부서당 팀장 1명 등)를 검사한다
+- 대시보드용 필드(department, tier)를 뺀 뒤 `.claude/agents/`로 복사한다 (Claude Code가 인식하는 위치)
 - `registry.json`(이름, 부서, 등급, 모델)을 만들어 대시보드가 읽게 한다
+- `--target`으로 다른 프로젝트나 사용자 폴더(`~`)에도 설치할 수 있다
 
 > `description`이 가장 중요하다. 메인 AI는 이 문장을 보고 누구에게 일을 맡길지 정한다. "언제 써야 하는지"를 구체적으로 쓴다.
 
@@ -112,15 +112,25 @@ owner: ms1971lee
 에이전트가 많아질수록 생기는 문제가 있다. 메인 AI가 모든 에이전트의 설명을 한꺼번에 보면 **토큰이 낭비되고 선택도 부정확해진다.** 그래서 회사 조직처럼 계층을 둔다.
 
 ```
-메인(비서실장)
- ├─ dev-lead        → architect, code-reviewer, test-writer ...
- ├─ marketing-lead  → copywriter, seo-analyst ...
- └─ lifestyle-lead  → saju-advisor ...
+메인(사무실 매니저)
+ ├─ planning-lead      → product-planner, requirements-analyst
+ ├─ design-lead        → ux-designer, visual-designer
+ ├─ uiux-lead          → frontend-developer, accessibility-specialist
+ ├─ dev-lead           → architect, backend-developer
+ ├─ qa-lead            → test-engineer, code-reviewer
+ └─ verification-lead  → acceptance-verifier, security-auditor
 ```
 
-- 메인 세션에는 **부서장만** 노출한다.
-- 부서장 에이전트의 지시문에 "어떤 전문가에게 넘길지" 판단 기준을 적는다.
-- 프로젝트마다 필요한 부서만 활성화한다. 예: 개발 저장소에는 development만 동기화한다.
+**제약: Claude Code에서 서브에이전트는 다른 서브에이전트를 직접 호출할 수 없다.** 그래서 팀장은 일을 직접 넘기지 않는다.
+
+1. 메인이 팀장을 호출한다
+2. 팀장은 `workspace/<작업명>/<NN-팀>/plan.md`에 **작업 지시서**(배정표)를 쓴다
+3. 메인이 배정표대로 전문가를 호출한다
+4. 팀 간 정보는 대화가 아니라 **작업 폴더의 문서**로 전달한다 (서브에이전트는 서로의 대화를 보지 못한다)
+
+운영 규칙 전체는 `office/ORCHESTRATION.md`에 있고, `CLAUDE.md`가 이를 불러온다. 비용을 아끼기 위해 기획 완료, 기술 스택 결정, 검증 판정 시점에는 메인이 멈추고 사용자에게 확인받는다.
+
+에이전트가 수백 개로 늘어나면 프로젝트마다 필요한 부서만 동기화해서 메인이 보는 목록을 줄인다.
 
 실행 방식은 두 가지다.
 
@@ -246,9 +256,11 @@ claude-repository/
 
 ---
 
-## 7. 정해야 할 것
+## 7. 결정 사항
 
-1. **첫 부서**: 개발, 마케팅, 사주 중 어디부터 만들 것인가
-2. **실행 환경**: 개인 PC에서 돌릴 것인가, 상시 켜진 서버나 클라우드에서 돌릴 것인가 (24시간 운영이면 서버 필요)
-3. **대시보드 기술**: Python(FastAPI) 또는 Node(TypeScript)
-4. **월 예산 상한**: 알림 기준 금액
+| 항목 | 결정 |
+|---|---|
+| 첫 부서 | 기획팀, 디자인팀, UIUX개발팀, 개발팀, 품질관리팀, 검증팀 (소프트웨어 제작 라인) |
+| 실행 환경 | 개인 PC에서 시작, 24시간 운영이 필요해지면 서버로 이전 |
+| 대시보드와 스크립트 | Python (FastAPI + SQLite). 1단계 스크립트는 표준 라이브러리만 사용 |
+| 월 예산 상한 | 미정 (2단계 비용 집계 전에 정한다) |
