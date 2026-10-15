@@ -1,0 +1,266 @@
+# AI 에이전트 사무실 설계안
+
+> 목표: 역할별 AI 에이전트를 만들어 일을 맡기고, 누가 일하는지와 비용이 얼마인지 대시보드에서 한눈에 보는 시스템
+
+---
+
+## 1. 핵심 아이디어
+
+영상 속 시스템은 아래 네 가지로 나눌 수 있다.
+
+| 영상에서 보이는 것 | 실제 정체 | 우리가 만들 것 |
+|---|---|---|
+| 동그라미 하나 = 직원 | 역할 지시문이 담긴 마크다운 파일 | **에이전트 레지스트리** |
+| 일을 시키면 알아서 분담 | 메인 AI가 서브에이전트를 호출 | **오케스트레이터** |
+| ACTIVE / STANDBY 상태, 토큰 비용 | 실행 기록과 토큰 사용량을 수집해 집계 | **이벤트 수집기** |
+| J.A.R.V.I.S 화면 | 그 기록을 보여주는 웹페이지 | **대시보드** |
+| 24시간 일함 | 정해진 시간에 자동 실행 | **스케줄러** |
+
+설계 원칙:
+
+1. **파일이 기준이다.** 에이전트는 Git으로 관리하는 텍스트 파일이다. 버전 관리, 리뷰, 되돌리기가 쉽다.
+2. **작게 시작한다.** 실제로 쓰는 에이전트 5~10개로 시작해서 효과가 확인된 것만 늘린다.
+3. **보이지 않으면 관리할 수 없다.** 비용과 실행 기록은 1단계부터 남긴다.
+4. **기존 도구를 쓴다.** Claude Code의 서브에이전트, hooks, 헤드리스 실행(`claude -p`)을 그대로 쓰고, 직접 만드는 건 대시보드뿐이다.
+
+---
+
+## 2. 전체 구조
+
+```
+                ┌──────────────────────────────┐
+  사용자 ──────▶│  오케스트레이터               │◀──── 스케줄러 (cron)
+  (대화/명령)   │  Claude Code 메인 세션        │      jobs.yaml
+                │  또는 Agent SDK 스크립트       │
+                └──────────────┬───────────────┘
+                               │ 작업 위임
+                ┌──────────────▼───────────────┐
+                │  부서장 에이전트 (dev-lead 등) │
+                └──────────────┬───────────────┘
+                               │ 세부 위임
+                ┌──────────────▼───────────────┐
+                │  전문가 에이전트 (agents/*.md)│
+                └──────────────┬───────────────┘
+                               │ hooks: 시작/종료/도구 사용
+                ┌──────────────▼───────────────┐
+                │  이벤트 수집기                 │
+                │  events.jsonl → SQLite        │
+                │  + 세션 기록에서 토큰 사용량    │
+                └──────────────┬───────────────┘
+                               │ API / 실시간 푸시(SSE)
+                ┌──────────────▼───────────────┐
+                │  대시보드 (웹)                 │
+                │  부서별 카드 · 상태 · 비용      │
+                └──────────────────────────────┘
+```
+
+---
+
+## 3. 구성 요소별 설계
+
+### 3.1 에이전트 레지스트리
+
+**원본은 부서 폴더에 두고, Claude Code가 읽는 위치로 동기화한다.**
+
+```
+agents/
+├── planning/        기획팀     planning-lead, product-planner, requirements-analyst
+├── design/          디자인팀   design-lead, ux-designer, visual-designer
+├── uiux-dev/        UIUX개발팀 uiux-lead, frontend-developer, accessibility-specialist
+├── development/     개발팀     dev-lead, architect, backend-developer
+├── qa/              품질관리팀 qa-lead, test-engineer, code-reviewer
+└── verification/    검증팀     verification-lead, acceptance-verifier, security-auditor
+```
+
+부서 목록은 `config/departments.json`에 둔다.
+
+에이전트 파일 형식:
+
+```markdown
+---
+name: saju-advisor
+description: 사주 해석 요청이 있을 때 사용. 생년월일시를 받아 원국과 오행 균형을 분석한다.
+tools: Read, Write, WebSearch
+model: sonnet
+# ↓ 대시보드용 확장 필드 (Claude Code는 사용하지 않음)
+department: lifestyle
+tier: specialist        # lead | specialist
+owner: ms1971lee
+---
+당신은 30년 경력의 명리학자입니다.
+
+## 할 일
+1. 생년월일시를 만세력 기준 사주 원국으로 변환한다
+2. 오행 분포와 용신을 판단한다
+3. 아래 형식으로 정리한다
+...
+
+## 하지 말 것
+- 건강·법률·투자 판단을 단정하지 않는다
+```
+
+`scripts/sync_agents.py` 스크립트가 할 일:
+- `agents/*/*.md`를 읽어 필드(이름과 파일명 일치, 부서와 폴더 일치, 부서당 팀장 1명 등)를 검사한다
+- 대시보드용 필드(department, tier)를 뺀 뒤 `.claude/agents/`로 복사한다 (Claude Code가 인식하는 위치)
+- `registry.json`(이름, 부서, 등급, 모델)을 만들어 대시보드가 읽게 한다
+- `--target`으로 다른 프로젝트나 사용자 폴더(`~`)에도 설치할 수 있다
+
+> `description`이 가장 중요하다. 메인 AI는 이 문장을 보고 누구에게 일을 맡길지 정한다. "언제 써야 하는지"를 구체적으로 쓴다.
+
+### 3.2 오케스트레이터: 계층형 위임
+
+에이전트가 많아질수록 생기는 문제가 있다. 메인 AI가 모든 에이전트의 설명을 한꺼번에 보면 **토큰이 낭비되고 선택도 부정확해진다.** 그래서 회사 조직처럼 계층을 둔다.
+
+```
+메인(사무실 매니저)
+ ├─ planning-lead      → product-planner, requirements-analyst
+ ├─ design-lead        → ux-designer, visual-designer
+ ├─ uiux-lead          → frontend-developer, accessibility-specialist
+ ├─ dev-lead           → architect, backend-developer
+ ├─ qa-lead            → test-engineer, code-reviewer
+ └─ verification-lead  → acceptance-verifier, security-auditor
+```
+
+**제약: Claude Code에서 서브에이전트는 다른 서브에이전트를 직접 호출할 수 없다.** 그래서 팀장은 일을 직접 넘기지 않는다.
+
+1. 메인이 팀장을 호출한다
+2. 팀장은 `workspace/<작업명>/<NN-팀>/plan.md`에 **작업 지시서**(배정표)를 쓴다
+3. 메인이 배정표대로 전문가를 호출한다
+4. 팀 간 정보는 대화가 아니라 **작업 폴더의 문서**로 전달한다 (서브에이전트는 서로의 대화를 보지 못한다)
+
+운영 규칙 전체는 `office/ORCHESTRATION.md`에 있고, `CLAUDE.md`가 이를 불러온다. 비용을 아끼기 위해 기획 완료, 기술 스택 결정, 검증 판정 시점에는 메인이 멈추고 사용자에게 확인받는다.
+
+에이전트가 수백 개로 늘어나면 프로젝트마다 필요한 부서만 동기화해서 메인이 보는 목록을 줄인다.
+
+실행 방식은 두 가지다.
+
+| 방식 | 적합한 경우 |
+|---|---|
+| Claude Code 대화형 | 사람이 지켜보며 일을 시킬 때 |
+| `claude -p` 헤드리스 / Agent SDK | 예약 작업, 외부 시스템 연동, 반복 업무 |
+
+### 3.3 이벤트 수집기
+
+Claude Code **hooks**로 실행 이벤트를 남긴다. 설정 위치는 `.claude/settings.json`이다.
+
+| 시점 | hook | 기록 내용 |
+|---|---|---|
+| 서브에이전트 호출 직전 | `PreToolUse` (서브에이전트 호출 도구 매칭) | 에이전트 이름, 작업 설명, 시작 시각 |
+| 서브에이전트 종료 | `SubagentStop` | 종료 시각, 결과 상태 |
+| 세션 종료 | `Stop` / `SessionEnd` | 세션 ID |
+
+각 hook은 한 줄짜리 JSON을 `~/.agent-office/events.jsonl`에 추가하는 스크립트를 실행한다. 지원되는 hook 이름과 입력 형식은 Claude Code 버전마다 다를 수 있으므로 구현할 때 공식 문서로 확인한다.
+
+**토큰 비용**은 Claude Code 세션 기록(`~/.claude/projects/**/*.jsonl`)에서 구한다.
+- 응답마다 input, output, cache 읽기와 쓰기 토큰 수가 남는다
+- 모델별 단가표(`config/pricing.yaml`)를 곱해서 합산한다
+- 세션 ID로 에이전트 실행 기록과 연결해 에이전트별, 부서별 비용을 구한다
+
+**저장 구조 (SQLite)**
+
+```
+agents (name PK, department, tier, model, updated_at)
+runs   (id PK, agent, session_id, task, started_at, ended_at, status)
+usage  (id PK, session_id, model, input_tokens, output_tokens,
+        cache_read, cache_write, cost_usd, ts)
+```
+
+### 3.4 대시보드
+
+- **백엔드**: 작은 서버 하나(Python FastAPI 또는 Node). 하는 일은 세 가지다.
+  - `events.jsonl`과 세션 기록을 주기적으로 읽어 SQLite에 반영
+  - `/api/agents`, `/api/runs`, `/api/cost` 제공
+  - SSE로 상태 변화를 실시간 전송
+- **프론트엔드**: 영상처럼 부서 패널 안에 에이전트 카드를 배치한다.
+
+상태 규칙:
+
+| 상태 | 조건 |
+|---|---|
+| **ACTIVE** | 지금 실행 중 (시작 이벤트는 있고 종료 이벤트는 없음) |
+| **STANDBY** | 최근 24시간 안에 일함 |
+| **IDLE** | 그 외 |
+
+화면 구성:
+- 상단: 오늘 비용 / 어제 / 7일 / 전체, 실행 중인 에이전트 수
+- 왼쪽: 부서 필터, 부서별 에이전트 수
+- 가운데: 부서별 패널과 에이전트 카드(상태, 오늘 실행 횟수, 비용)
+- 오른쪽: 최근 이벤트 로그, 비용 상위 에이전트
+
+### 3.5 스케줄러
+
+`jobs.yaml`에 반복 업무를 정의하고 cron(또는 클라우드 예약 작업)으로 실행한다.
+
+```yaml
+- name: daily-saju-fortune
+  schedule: "0 7 * * *"
+  agent: saju-advisor
+  prompt: "오늘의 일진 운세를 작성해 output/fortune/ 에 저장"
+  budget_usd: 0.5
+- name: nightly-code-review
+  schedule: "0 2 * * *"
+  agent: code-reviewer
+  prompt: "어제 커밋된 변경사항 리뷰 후 리포트 작성"
+  budget_usd: 2
+```
+
+실행기는 `claude -p`를 호출하고 같은 hooks가 붙어 있으므로, 예약 작업도 대시보드에 자동으로 나타난다.
+
+---
+
+## 4. 비용 관리 (가장 중요)
+
+영상 기준 하루 약 $1,241, 한 달로 치면 약 $37,000이다. 처음부터 아래 장치를 둔다.
+
+1. **모델 등급 나누기**: 단순 분류와 요약에는 haiku, 일반 작업에는 sonnet, 설계와 어려운 판단에만 opus를 쓴다. 에이전트 파일의 `model` 필드로 지정한다.
+2. **작업별 예산**: `jobs.yaml`의 `budget_usd`를 넘으면 실행을 중단하거나 알린다.
+3. **일일 한도 알림**: 오늘 비용이 정한 금액을 넘으면 대시보드 경고와 알림을 보낸다.
+4. **도구 권한 최소화**: 에이전트마다 `tools`를 필요한 것만 연다. 비용도 줄고 사고도 막는다.
+5. **안 쓰는 에이전트 정리**: 30일 동안 실행되지 않은 에이전트는 비활성 목록으로 옮긴다.
+
+---
+
+## 5. 폴더 구조 (목표)
+
+```
+claude-repository/
+├── agents/                 # 에이전트 원본 (부서별)
+├── .claude/
+│   ├── agents/             # sync 결과물 (자동 생성)
+│   └── settings.json       # hooks 설정
+├── hooks/                  # 이벤트 기록 스크립트
+├── scripts/
+│   ├── sync-agents         # 레지스트리 검증과 동기화
+│   └── run-job             # 예약 작업 실행기
+├── dashboard/
+│   ├── server/             # 수집, API, SSE
+│   └── web/                # 화면
+├── config/
+│   ├── pricing.yaml        # 모델별 단가
+│   └── jobs.yaml           # 예약 작업
+└── docs/
+    └── DESIGN.md           # 이 문서
+```
+
+---
+
+## 6. 단계별 로드맵
+
+| 단계 | 내용 | 완료 기준 |
+|---|---|---|
+| **1. 첫 직원 채용** | 부서장 2명과 전문가 5명 정도를 작성하고 sync 스크립트를 만든다 | Claude Code에서 "사주 봐줘"라고 하면 saju-advisor가 호출된다 |
+| **2. 출근부** | hooks와 events.jsonl, 토큰 비용 집계 스크립트 | 터미널에서 오늘 누가 몇 번 일했고 비용이 얼마인지 출력된다 |
+| **3. 상황실** | 대시보드 서버와 화면 | 브라우저에서 부서별 카드와 비용이 실시간으로 바뀐다 |
+| **4. 야간 근무** | jobs.yaml과 스케줄러, 예산 제한 | 아침에 밤사이 결과물과 비용 리포트가 쌓여 있다 |
+| **5. 확장** | 부서와 에이전트 추가, 공개 에이전트 모음 가져오기, 품질 평가 | 쓰임이 확인된 에이전트만 남는다 |
+
+---
+
+## 7. 결정 사항
+
+| 항목 | 결정 |
+|---|---|
+| 첫 부서 | 기획팀, 디자인팀, UIUX개발팀, 개발팀, 품질관리팀, 검증팀 (소프트웨어 제작 라인) |
+| 실행 환경 | 개인 PC에서 시작, 24시간 운영이 필요해지면 서버로 이전 |
+| 대시보드와 스크립트 | Python (FastAPI + SQLite). 1단계 스크립트는 표준 라이브러리만 사용 |
+| 월 예산 상한 | 미정 (2단계 비용 집계 전에 정한다) |
